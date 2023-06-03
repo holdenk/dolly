@@ -312,7 +312,7 @@ def train(
     trainer.save_model(output_dir=local_output_dir)
     # QLORA does not write out a config for some reason
     if qlora_4bit:
-        trainer.model.save_config(f"{local_output_dir}/config.json")
+        trainer.model.config.to_json_file(f"{local_output_dir}/config.json")
 
     if dbfs_output_dir:
         logger.info(f"Saving Model to {dbfs_output_dir}")
