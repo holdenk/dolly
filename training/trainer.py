@@ -126,20 +126,49 @@ def load_tokenizer(pretrained_model_name_or_path: str = DEFAULT_INPUT_MODEL) -> 
 
 
 def load_model(
-    pretrained_model_name_or_path: str = DEFAULT_INPUT_MODEL, *, gradient_checkpointing: bool = False
+    pretrained_model_name_or_path: str = DEFAULT_INPUT_MODEL, *, gradient_checkpointing: bool = False, qlora_4bit: bool = False,
 ) -> AutoModelForCausalLM:
     logger.info(f"Loading model for {pretrained_model_name_or_path}")
-    model = AutoModelForCausalLM.from_pretrained(
-        pretrained_model_name_or_path, trust_remote_code=True, use_cache=False if gradient_checkpointing else True
-    )
-    return model
+    if qlora_4bit:
+        from transformers import BitsAndBytesConfig
+        import torch
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+        from peft import prepare_model_for_kbit_training
+        from peft import LoraConfig, get_peft_model
+
+
+        model = AutoModelForCausalLM.from_pretrained(
+            pretrained_model_name_or_path, trust_remote_code=True, use_cache=False if gradient_checkpointing else True,
+            quantization_config=quantization_config,
+            device_map='auto',
+        )
+        model = prepare_model_for_kbit_training(model)
+        config = LoraConfig(
+            r=8,
+            lora_alpha=32,
+            target_modules=["query_key_value"],
+            lora_dropout=0.05,
+            bias="none",
+            task_type="CAUSAL_LM"
+        )
+        model = get_peft_model(model, config)
+        return model
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            pretrained_model_name_or_path, trust_remote_code=True, use_cache=False if gradient_checkpointing else True)
+        return model
 
 
 def get_model_tokenizer(
-    pretrained_model_name_or_path: str = DEFAULT_INPUT_MODEL, *, gradient_checkpointing: bool = False
+  pretrained_model_name_or_path: str = DEFAULT_INPUT_MODEL, *, gradient_checkpointing: bool = False, qlora_4bit: bool = False,
 ) -> Tuple[AutoModelForCausalLM, PreTrainedTokenizer]:
     tokenizer = load_tokenizer(pretrained_model_name_or_path)
-    model = load_model(pretrained_model_name_or_path, gradient_checkpointing=gradient_checkpointing)
+    model = load_model(pretrained_model_name_or_path, gradient_checkpointing=gradient_checkpointing, qlora_4bit=qlora_4bit)
     model.resize_token_embeddings(len(tokenizer))
 
     return model, tokenizer
@@ -200,11 +229,12 @@ def train(
     save_total_limit: int,
     warmup_steps: int,
     training_dataset: str = DEFAULT_TRAINING_DATASET,
+    qlora_4bit: bool = False,
 ):
     set_seed(seed)
 
     model, tokenizer = get_model_tokenizer(
-        pretrained_model_name_or_path=input_model, gradient_checkpointing=gradient_checkpointing
+        pretrained_model_name_or_path=input_model, gradient_checkpointing=gradient_checkpointing, qlora_4bit=qlora_4bit,
     )
 
     # Use the same max length that the model supports.  Fall back to 1024 if the setting can't be found.
@@ -280,6 +310,9 @@ def train(
 
     logger.info(f"Saving Model to {local_output_dir}")
     trainer.save_model(output_dir=local_output_dir)
+    # QLORA does not write out a config for some reason
+    if qlora_4bit:
+        trainer.model.save_config(f"{local_output_dir}/config.json")
 
     if dbfs_output_dir:
         logger.info(f"Saving Model to {dbfs_output_dir}")
@@ -307,6 +340,7 @@ def train(
 @click.option("--seed", type=int, default=DEFAULT_SEED, help="Seed to use for training.")
 @click.option("--deepspeed", type=str, default=None, help="Path to deepspeed config file.")
 @click.option("--training-dataset", type=str, default=DEFAULT_TRAINING_DATASET, help="Path to dataset for training")
+@click.option("--qlora-4bit", type=bool, default=False, help="Use 4 bit QLORA")
 @click.option(
     "--gradient-checkpointing/--no-gradient-checkpointing",
     is_flag=True,
